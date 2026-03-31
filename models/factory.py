@@ -2,7 +2,7 @@ from models.mlp import MLPActor, MLPCritic
 from models.cnn import CNNActor, CNNCritic
 from models.lstm import LSTMActor, LSTMCritic
 from models.transformer import TransformerActor, TransformerCritic
-from config.schema import NetworkType, NetworkConfig
+from config import NetworkType, NetworkConfig
 import torch
 
 class NetworkFactory:

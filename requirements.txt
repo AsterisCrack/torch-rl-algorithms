@@ -1,0 +1,23 @@
+# ============================================================
+# Dependency map (per module)
+# ============================================================
+# algorithms/   →  torch, numpy, gymnasium, tensorboardX, tqdm, pydantic
+# models/       →  torch, numpy, pydantic
+# config.py     →  pydantic
+# ============================================================
+
+# Core
+torch>=2.0.0          # Neural networks, autograd
+numpy>=1.24.0         # Array ops, replay buffer
+gymnasium>=0.29.0     # Environment interface (spaces, wrappers)
+
+# Config
+pydantic>=2.0.0       # NetworkConfig / NetworkType schema
+
+# Training utilities
+tensorboardX>=2.6.0   # TensorBoard logging in Trainer
+tqdm>=4.65.0          # Progress bar in Trainer
+
+# Optional: install the matching CUDA build of PyTorch from pytorch.org
+# if you want GPU training (strongly recommended):
+#   pip install torch --index-url https://download.pytorch.org/whl/cu121

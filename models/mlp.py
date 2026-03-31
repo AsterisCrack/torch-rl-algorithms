@@ -57,8 +57,6 @@ class MLPActor(nn.Module):
         if hasattr(out, 'mean'):
              # Return mean for deterministic action, but stay on device
              return out.mean
-        # For other distributions, sample or return mean? 
-        # Usually get_action implies deterministic/greedy for eval.
         if hasattr(out, 'loc'):
             return out.loc
         return out

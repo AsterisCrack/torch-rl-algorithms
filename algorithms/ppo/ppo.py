@@ -87,13 +87,7 @@ class PPO:
             else:
                 critic_obs = obs_tensor
                 
-            value = self.model.critic(critic_obs, None) # Critic usually takes (obs, action) or just obs. For PPO V(s), it takes obs.
-            # But our MLPCritic takes (obs, action). We need to adjust MLPCritic or use a different one.
-            # Wait, MLPCritic in networks.py takes (obs, actions).
-            # For PPO, we need V(s).
-            # I should check if I need a specific PPO Critic or if I can pass dummy actions or if MLPCritic handles None actions.
-            # MLPCritic: out = torch.cat([observations, actions], dim=-1) -> This will fail if actions is None.
-            # I need a ValueNetwork for PPO.
+            value = self.model.critic(critic_obs, None)
             
         # Store data for update
         self.last_step_data = {
@@ -148,9 +142,6 @@ class PPO:
             next_critic_obs = to_tensor(next_critic_obs, self.device)
             
             with torch.no_grad():
-                # We need a way to call critic for V(s). 
-                # If using standard MLPCritic, we might need to adapt it.
-                # For now assuming model.critic can handle it or we fixed it.
                 next_value = self.model.critic(next_critic_obs, None)
                 
             # Compute returns
@@ -199,11 +190,6 @@ class PPO:
                     entropy = entropy.sum(dim=-1)
                     
                 # Get current value
-                # Assuming critic handles V(s)
-                # If using shared backbone, we might need to pass obs to a joint model
-                # But here we have separate actor/critic in model
-                # We need to handle the critic input issue.
-                # For now, let's assume we fix the critic to accept None actions or we use a specific PPO critic.
                 values = self.model.critic(obs_batch, None)
                 if values.dim() > 1:
                     values = values.squeeze(-1)

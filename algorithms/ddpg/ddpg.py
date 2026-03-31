@@ -3,7 +3,6 @@ import torch
 import numpy as np
 from gymnasium import spaces
 from algorithms.utils import Buffer, NormalActionNoise, to_tensor
-from envs.isaaclab.mdp.symmetry import compute_symmetric_states
 
 class DeterministicPolicyGradient:
     def __init__(self, model, device=torch.device("cpu"), seq_length=1, optimizer=None, gradient_clip=0, recurrent_model = False):
@@ -154,19 +153,6 @@ class DDPG():
     ):
         self.config = config
         self.model = model
-        
-        # Determine if symmetry augmentation is enabled from config
-        self.use_symmetry = False
-        if self.config:
-            # Check pydantic model structure generally found in this project
-            if hasattr(self.config, "train") and hasattr(self.config.train, "symmetry_augmentation"):
-                 self.use_symmetry = self.config.train.symmetry_augmentation
-            # Fallback for dict access
-            elif hasattr(self.config, "__getitem__"):
-                 try:
-                     self.use_symmetry = self.config["train"]["symmetry_augmentation"]
-                 except:
-                     pass
         self.recurrent_model = recurrent_model
         self.max_seq_length = max_seq_length
         self.observation_memory = torch.zeros((max_seq_length, num_workers, model.actor.observation_size), dtype=torch.float32).to(device) if recurrent_model else None
@@ -209,11 +195,6 @@ class DDPG():
                          'next_observations_actor', 'next_observations_critic', 'rewards', 'discounts')
         else:
             self.keys = ('observations', 'actions', 'next_observations', 'rewards', 'discounts')
-            
-        self.env = None # Environment reference for symmetry
-
-    def set_env(self, env):
-        self.env = env
 
     def save(self, path):
         path = path + '.pt'
@@ -257,19 +238,7 @@ class DDPG():
         self.last_actions = actions.clone()  # Use clone for tensors
         
         # Keep some values for the next update.
-        if not self.recurrent_model:
-            self.last_observations = observations # Store full dict/array
-        else:
-            # First, store action into last actions
-            # Note: Tensors equivalent of np.roll is tricky in-place, better to re-construct or use indexing
-            # self.action_memory = np.roll(self.action_memory, shift=-1, axis=0) # Removed for GPU support
-            
-            # Recurrent support needs full review for GPU-only support
-            # For now, we assume simple case or implement circular buffer later
-            # self.last_observations = self.observation_memory.cpu().numpy().copy()
-            pass
-            
-            # Recurrent logic deferred for full GPU overhaul
+        self.last_observations = observations # Store full dict/array
 
         return actions
 
@@ -297,56 +266,6 @@ class DDPG():
             observations=self.last_observations, actions=self.last_actions,
             next_observations=observations, rewards=rewards, resets=resets,
             terminations=terminations)
-
-        # Symmetry Augmentation
-        if self.use_symmetry and self.env is not None and compute_symmetric_states is not None:
-            # Unwrap to get the underlying DirectRLEnv which has the config
-            real_env = self.env.env if hasattr(self.env, "env") else self.env
-            
-            # Check if symmetry is applicable (BipedEnv usually)
-            # We wrap non-dict obs if necessary, though BipedEnv usually returns dict
-            obs_in = self.last_observations
-            next_obs_in = observations
-            
-            is_dict = isinstance(obs_in, dict)
-            
-            if not is_dict:
-                # Wrap in dict for symmetry function
-                obs_in = {"policy": obs_in}
-                next_obs_in = {"policy": next_obs_in}
-            
-            # Compute Symmetry
-            # Note: We catch errors to avoid crashing training if symmetry fails for some reason (e.g. mismatch dims)
-            try:
-                with torch.no_grad():
-                     obs_aug, act_aug = compute_symmetric_states(real_env, obs=obs_in, actions=self.last_actions)
-                     next_obs_aug, _ = compute_symmetric_states(real_env, obs=next_obs_in, actions=None)
-                     
-                     if obs_aug is not None and act_aug is not None and next_obs_aug is not None:
-                         # Extract the symmetric part (second half)
-                         # obs_aug is [2*N, ...], we want [N:, ...]
-                         
-                         if is_dict:
-                             sym_obs = {k: v[v.shape[0]//2:] for k, v in obs_aug.items() if v is not None}
-                             sym_next_obs = {k: v[v.shape[0]//2:] for k, v in next_obs_aug.items() if v is not None}
-                         else:
-                             # Unwrap
-                             v = obs_aug["policy"]
-                             sym_obs = v[v.shape[0]//2:]
-                             nv = next_obs_aug["policy"]
-                             sym_next_obs = nv[nv.shape[0]//2:]
-                        
-                         batch_size = self.last_actions.shape[0]
-                         sym_actions = act_aug[batch_size:]
-                         
-                         # Store Symmetric transition
-                         self.replay.store(
-                            observations=sym_obs, actions=sym_actions,
-                            next_observations=sym_next_obs, rewards=rewards, resets=resets,
-                            terminations=terminations)
-            except Exception as e:
-                print(f"Symmetry augmentation skipped due to error: {e}")
-                pass
 
         # Prepare to update the normalizers.
         if self.is_dict_obs:

@@ -5,7 +5,18 @@ import os
 import time
 from tensorboardX import SummaryWriter
 from tqdm import tqdm
-from utils import NoConfig
+
+
+class NoConfig:
+    """Null-object config used when no config file is provided."""
+    def __getitem__(self, key):
+        return NoConfig()
+    def get(self, key, default=None):
+        return default
+    def __getattr__(self, name):
+        return NoConfig()
+    def __bool__(self):
+        return False
 
 def to_tensor(obs, device):
     """Converts observations (array or dict) to torch tensors."""

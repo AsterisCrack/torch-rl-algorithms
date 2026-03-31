@@ -6,7 +6,7 @@ from torch.distributions import Normal
 import copy
 from algorithms.utils import MeanStd
 from models.factory import NetworkFactory
-from config.schema import NetworkType, NetworkConfig
+from config import NetworkType, NetworkConfig
 from gymnasium import spaces
     
 class BaseActorCritic(nn.Module):

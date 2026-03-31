@@ -31,18 +31,7 @@ class PPO(Model):
             action_space=env.action_space,
             device=device,
             config=config,
-            optimizer=self.actor_optimizer, # PPO typically uses one optimizer for both or separate. Here we pass one, but PPO init creates one if None.
-            # Actually Model class creates actor_optimizer and critic_optimizer.
-            # PPO usually optimizes both together if shared, or separate.
-            # Our ActorCritic has separate nets.
-            # Let's pass None and let PPO create a single optimizer for all parameters, or we can use the ones from Model.
-            # If we use Model's optimizers, we have two. PPO implementation I wrote expects one `optimizer`.
-            # So I will pass None and let PPO create one for `self.model.parameters()`.
-            # But wait, `Model` class initializes schedulers too.
-            # If I want to use the schedulers from `Model`, I should adapt PPO to use them.
-            # But `Model` creates `actor_optimizer` and `critic_optimizer` as functions that take params.
-            # I can combine params and use one optimizer.
-            
+            optimizer=self.actor_optimizer,
             clip_param=ppo_cfg.get("clip_param", 0.2),
             ppo_epoch=ppo_cfg.get("ppo_epoch", 4),
             num_mini_batches=ppo_cfg.get("num_mini_batches", 4),
@@ -55,9 +44,6 @@ class PPO(Model):
             num_envs=env.num_envs,
         )
         
-        # Override optimizer if we want to use the one from Model (with scheduler)
-        # But Model defines them as factories.
-        # Let's use the factory to create one optimizer for all params
         if hasattr(self, "actor_optimizer"):
             # self.actor_optimizer is a lambda that takes params
             self.agent.optimizer = self.actor_optimizer(self.model.parameters())
