@@ -85,7 +85,7 @@ git submodule update --init
 pip install -e torch-rl-algorithms/
 ```
 
-Imports work exactly as if the code were local — no path hacks needed:
+Imports work exactly as if the code were local - no path hacks needed:
 
 ```python
 from algorithms.sac.model import SAC
@@ -118,7 +118,7 @@ from algorithms.mpo.model import MPO
 
 ## Configuration
 
-Network architecture is configured via `NetworkConfig`. All fields are optional — defaults give a standard MLP actor-critic.
+Network architecture is configured via `NetworkConfig`. All fields are optional - defaults give a standard MLP actor-critic.
 
 ```python
 from config import NetworkConfig, NetworkType
@@ -201,7 +201,7 @@ torch-rl-algorithms/
 │   ├── lstm.py           # LSTMTorso, LSTMActor, LSTMCritic
 │   ├── transformer.py    # CausalTransformer, TransformerTorso, TransformerActor, TransformerCritic
 │   ├── networks.py       # ActorCritic, ActorCriticWithTargets, ActorTwinCriticWithTargets
-│   ├── factory.py        # NetworkFactory — builds actor/critic from NetworkConfig
+│   ├── factory.py        # NetworkFactory - builds actor/critic from NetworkConfig
 │   └── utils/
 │       └── base.py       # Torso, Head (abstract base classes)
 ├── config.py             # NetworkType, NetworkConfig (pydantic schemas)
@@ -213,11 +213,11 @@ torch-rl-algorithms/
 
 ## Design Decisions
 
-- **DDPG as base class** — SAC and D4PG extend `DDPG`. The step/update loop, replay buffer, and exploration handling live once in DDPG; subclasses only override the actor/critic updaters.
-- **Separate actor and critic updaters** — Each updater is a callable object (`DeterministicPolicyGradient`, `TwinCriticSoftQLearning`, etc.) with its own optimizer. Makes it easy to swap loss functions without touching the training loop.
-- **NetworkFactory** — Decouples architecture choice from algorithm code. Pass `NetworkConfig` to get the right actor/critic regardless of backbone type.
-- **Observation normalizer** — All torsos accept an optional `MeanStd` normalizer that updates online during training. No preprocessing pipeline needed.
-- **Dict observation spaces** — All algorithms handle both flat `Box` and `Dict` observation spaces (e.g. separate actor/critic observations for privileged critic setups).
+- **DDPG as base class** - SAC and D4PG extend `DDPG`. The step/update loop, replay buffer, and exploration handling live once in DDPG; subclasses only override the actor/critic updaters.
+- **Separate actor and critic updaters** - Each updater is a callable object (`DeterministicPolicyGradient`, `TwinCriticSoftQLearning`, etc.) with its own optimizer. Makes it easy to swap loss functions without touching the training loop.
+- **NetworkFactory** - Decouples architecture choice from algorithm code. Pass `NetworkConfig` to get the right actor/critic regardless of backbone type.
+- **Observation normalizer** - All torsos accept an optional `MeanStd` normalizer that updates online during training. No preprocessing pipeline needed.
+- **Dict observation spaces** - All algorithms handle both flat `Box` and `Dict` observation spaces (e.g. separate actor/critic observations for privileged critic setups).
 
 ---
 
