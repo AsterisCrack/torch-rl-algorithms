@@ -1,8 +1,12 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from algorithms.ppo.buffer import RolloutBuffer
-from algorithms.utils import to_tensor
+try:
+    from algorithms.ppo.buffer import RolloutBuffer
+    from algorithms.utils import to_tensor
+except ImportError:
+    from torch_rl_algorithms.algorithms.ppo.buffer import RolloutBuffer
+    from torch_rl_algorithms.algorithms.utils import to_tensor
 
 class PPO:
     def __init__(

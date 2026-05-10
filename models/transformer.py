@@ -4,8 +4,12 @@ import torch.nn.functional as F
 from torch.distributions import Normal
 import math
 import numpy as np
-from algorithms.utils import SquashedMultivariateNormalDiag, DistributionalValueHead
-from models.utils.base import Torso
+try:
+    from algorithms.utils import SquashedMultivariateNormalDiag, DistributionalValueHead
+    from models.utils.base import Torso
+except ImportError:
+    from torch_rl_algorithms.algorithms.utils import SquashedMultivariateNormalDiag, DistributionalValueHead
+    from torch_rl_algorithms.models.utils.base import Torso
 
 def posemb_sincos_1d(seq, dim, temperature=10000, device=None, dtype=torch.float32):
     """

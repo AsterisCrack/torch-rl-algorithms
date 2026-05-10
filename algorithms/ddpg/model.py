@@ -1,6 +1,11 @@
-from models.networks import ActorCriticWithTargets
-from algorithms.ddpg.ddpg import DDPG as DDPGAlgorithm
-from algorithms.utils import Model
+try:
+    from models.networks import ActorCriticWithTargets
+    from algorithms.ddpg.ddpg import DDPG as DDPGAlgorithm
+    from algorithms.utils import Model
+except ImportError:
+    from torch_rl_algorithms.models.networks import ActorCriticWithTargets
+    from torch_rl_algorithms.algorithms.ddpg.ddpg import DDPG as DDPGAlgorithm
+    from torch_rl_algorithms.algorithms.utils import Model
 import torch
 
 class DDPG(Model):

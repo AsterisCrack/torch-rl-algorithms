@@ -1,7 +1,13 @@
-from models.mlp import MLPActor, MLPCritic
-from models.cnn import CNNActor, CNNCritic
-from models.lstm import LSTMActor, LSTMCritic
-from models.transformer import TransformerActor, TransformerCritic
+try:
+    from models.mlp import MLPActor, MLPCritic
+    from models.cnn import CNNActor, CNNCritic
+    from models.lstm import LSTMActor, LSTMCritic
+    from models.transformer import TransformerActor, TransformerCritic
+except ImportError:
+    from torch_rl_algorithms.models.mlp import MLPActor, MLPCritic
+    from torch_rl_algorithms.models.cnn import CNNActor, CNNCritic
+    from torch_rl_algorithms.models.lstm import LSTMActor, LSTMCritic
+    from torch_rl_algorithms.models.transformer import TransformerActor, TransformerCritic
 from config import NetworkType, NetworkConfig
 import torch
 

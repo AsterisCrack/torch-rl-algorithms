@@ -1,6 +1,11 @@
-from models.networks import ActorCritic
-from algorithms.ppo.ppo import PPO as PPOAlgorithm
-from algorithms.utils import Model
+try:
+    from models.networks import ActorCritic
+    from algorithms.ppo.ppo import PPO as PPOAlgorithm
+    from algorithms.utils import Model
+except ImportError:
+    from torch_rl_algorithms.models.networks import ActorCritic
+    from torch_rl_algorithms.algorithms.ppo.ppo import PPO as PPOAlgorithm
+    from torch_rl_algorithms.algorithms.utils import Model
 import torch
 
 class PPO(Model):

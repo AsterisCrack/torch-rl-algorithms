@@ -1,7 +1,10 @@
 import os
 import torch
 import numpy as np
-from algorithms.utils import Buffer, to_tensor
+try:
+    from algorithms.utils import Buffer, to_tensor
+except ImportError:
+    from torch_rl_algorithms.algorithms.utils import Buffer, to_tensor
 
 FLOAT_EPSILON = 1e-8
 

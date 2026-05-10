@@ -1,6 +1,11 @@
-from models.networks import ActorCriticWithTargets
-from algorithms.d4pg.d4pg import D4PG as D4PGAlgorithm
-from algorithms.utils import Model
+try:
+    from models.networks import ActorCriticWithTargets
+    from algorithms.d4pg.d4pg import D4PG as D4PGAlgorithm
+    from algorithms.utils import Model
+except ImportError:
+    from torch_rl_algorithms.models.networks import ActorCriticWithTargets
+    from torch_rl_algorithms.algorithms.d4pg.d4pg import D4PG as D4PGAlgorithm
+    from torch_rl_algorithms.algorithms.utils import Model
 import torch
 
 class D4PG(Model):

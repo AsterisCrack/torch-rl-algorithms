@@ -8,11 +8,18 @@ Run from the repo root:
 
 import gymnasium as gym
 from config import NetworkConfig, NetworkType
-from algorithms.sac.model import SAC
-from algorithms.ppo.model import PPO
-from algorithms.ddpg.model import DDPG
-from algorithms.d4pg.model import D4PG
-from algorithms.mpo.model import MPO
+try:
+    from algorithms.sac.model import SAC
+    from algorithms.ppo.model import PPO
+    from algorithms.ddpg.model import DDPG
+    from algorithms.d4pg.model import D4PG
+    from algorithms.mpo.model import MPO
+except ImportError:
+    from torch_rl_algorithms.algorithms.sac.model import SAC
+    from torch_rl_algorithms.algorithms.ppo.model import PPO
+    from torch_rl_algorithms.algorithms.ddpg.model import DDPG
+    from torch_rl_algorithms.algorithms.d4pg.model import D4PG
+    from torch_rl_algorithms.algorithms.mpo.model import MPO
 
 # ── Environment ───────────────────────────────────────────────────────────────
 

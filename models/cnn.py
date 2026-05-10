@@ -1,8 +1,12 @@
 import torch
 import torch.nn as nn
 from torch.distributions import Normal
-from algorithms.utils import SquashedMultivariateNormalDiag, DistributionalValueHead
-from models.utils.base import Torso
+try:
+    from algorithms.utils import SquashedMultivariateNormalDiag, DistributionalValueHead
+    from models.utils.base import Torso
+except ImportError:
+    from torch_rl_algorithms.algorithms.utils import SquashedMultivariateNormalDiag, DistributionalValueHead
+    from torch_rl_algorithms.models.utils.base import Torso
 
 class CNNTorso(Torso):
     def __init__(self, observation_space, history_size, cnn_sizes, observation_normalizer=None):

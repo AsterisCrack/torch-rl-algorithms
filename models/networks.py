@@ -4,8 +4,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributions import Normal
 import copy
-from algorithms.utils import MeanStd
-from models.factory import NetworkFactory
+try:
+    from algorithms.utils import MeanStd
+    from models.factory import NetworkFactory
+except ImportError:
+    from torch_rl_algorithms.algorithms.utils import MeanStd
+    from torch_rl_algorithms.models.factory import NetworkFactory
 from config import NetworkType, NetworkConfig
 from gymnasium import spaces
     

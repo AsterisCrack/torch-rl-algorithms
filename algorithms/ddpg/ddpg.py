@@ -2,7 +2,10 @@ import os
 import torch
 import numpy as np
 from gymnasium import spaces
-from algorithms.utils import Buffer, NormalActionNoise, to_tensor
+try:
+    from algorithms.utils import Buffer, NormalActionNoise, to_tensor
+except ImportError:
+    from torch_rl_algorithms.algorithms.utils import Buffer, NormalActionNoise, to_tensor
 
 class DeterministicPolicyGradient:
     def __init__(self, model, device=torch.device("cpu"), seq_length=1, optimizer=None, gradient_clip=0, recurrent_model = False):

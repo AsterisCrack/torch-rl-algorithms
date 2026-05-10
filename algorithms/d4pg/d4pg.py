@@ -1,8 +1,12 @@
 import os
 import torch
 import numpy as np
-import algorithms.ddpg.ddpg as ddpg
-from algorithms.utils import NoActionNoise, Buffer
+try:
+    import algorithms.ddpg.ddpg as ddpg
+    from algorithms.utils import NoActionNoise, Buffer
+except ImportError:
+    import torch_rl_algorithms.algorithms.ddpg.ddpg as ddpg
+    from torch_rl_algorithms.algorithms.utils import NoActionNoise, Buffer
 
 class DistributionalDeterministicPolicyGradient:
     def __init__(self, model, action_space, device=torch.device("cpu"), seq_length=1, optimizer=None, gradient_clip=0, recurrent_model = False):

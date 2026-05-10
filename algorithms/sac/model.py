@@ -1,6 +1,11 @@
-from models.networks import ActorTwinCriticWithTargets
-from algorithms.sac.sac import SAC as SACAlgorithm
-from algorithms.utils import Model
+try:
+    from models.networks import ActorTwinCriticWithTargets
+    from algorithms.sac.sac import SAC as SACAlgorithm
+    from algorithms.utils import Model
+except ImportError:
+    from torch_rl_algorithms.models.networks import ActorTwinCriticWithTargets
+    from torch_rl_algorithms.algorithms.sac.sac import SAC as SACAlgorithm
+    from torch_rl_algorithms.algorithms.utils import Model
 import torch
 
 class SAC(Model):

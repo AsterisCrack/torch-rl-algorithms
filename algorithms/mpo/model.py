@@ -1,6 +1,11 @@
-from models.networks import ActorCriticWithTargets
-from algorithms.mpo.mpo import MPO as MPOAlgorithm
-from algorithms.utils import Model
+try:
+    from models.networks import ActorCriticWithTargets
+    from algorithms.mpo.mpo import MPO as MPOAlgorithm
+    from algorithms.utils import Model
+except ImportError:
+    from torch_rl_algorithms.models.networks import ActorCriticWithTargets
+    from torch_rl_algorithms.algorithms.mpo.mpo import MPO as MPOAlgorithm
+    from torch_rl_algorithms.algorithms.utils import Model
 import torch
 
 class MPO(Model):
