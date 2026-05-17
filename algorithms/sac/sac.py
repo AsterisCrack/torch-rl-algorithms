@@ -3,10 +3,10 @@ import torch
 import numpy as np
 try:
     import algorithms.ddpg.ddpg as ddpg
-    from algorithms.utils import NoActionNoise, DecayingEntropyCoeff, to_tensor
+    from algorithms.utils import NoActionNoise, DecayingEntropyCoeff, AutoEntropyCoeff, to_tensor
 except ImportError:
     import torch_rl_algorithms.algorithms.ddpg.ddpg as ddpg
-    from torch_rl_algorithms.algorithms.utils import NoActionNoise, DecayingEntropyCoeff, to_tensor
+    from torch_rl_algorithms.algorithms.utils import NoActionNoise, DecayingEntropyCoeff, AutoEntropyCoeff, to_tensor
 
 class TwinCriticSoftDeterministicPolicyGradient:
     def __init__(self, model, action_space, device=torch.device("cpu"), seq_length=1, optimizer=None, entropy_coeff=DecayingEntropyCoeff(), gradient_clip=0, recurrent_model = False):
@@ -153,11 +153,11 @@ class TwinCriticSoftQLearning:
                 next_observations, next_actions)
             next_values = torch.min(next_values_1, next_values_2)
             rewards_copy = rewards.clone()
-            
-            # Update entropy coefficient to raise a step in the decaying entropy coefficient
-            self.entropy_coeff.update()
             returns = rewards_copy + discounts * (
                 next_values - self.entropy_coeff.value * next_log_probs)
+
+        # Update temperature outside no_grad so alpha_loss retains its grad_fn
+        self.entropy_coeff.update(next_log_probs)
 
         self.optimizer.zero_grad()
         values_1 = self.model.critic_1(observations, actions)
@@ -180,11 +180,13 @@ class SAC(ddpg.DDPG):
     '''
 
     def __init__(
-        self, action_space, model, max_seq_length=1, num_workers=1,seed=None, replay=None, exploration=None, actor_updater=None,
-        critic_updater=None, recurrent_model=False, actor_optimizer=None, critic_optimizer=None, device=torch.device("cpu"), config=None
+        self, action_space, model, max_seq_length=1, num_workers=1, seed=None, replay=None, exploration=None, actor_updater=None,
+        critic_updater=None, recurrent_model=False, actor_optimizer=None, critic_optimizer=None, device=torch.device("cpu"), config=None,
+        symmetry_fn=None,
     ):
         model = model
-        self.entropy_coeff = DecayingEntropyCoeff(initial=0.2, minimum=0.01, decay_rate=1e-6, start_steps=10000)
+        action_dim = action_space.shape[0]
+        self.entropy_coeff = AutoEntropyCoeff(action_dim=action_dim, device=device)
         exploration = NoActionNoise(policy=self._policy, action_space=action_space, seed=seed, device=device) if exploration is None else exploration
         actor_updater = TwinCriticSoftDeterministicPolicyGradient(model=model, action_space=action_space, device=device, optimizer=actor_optimizer, entropy_coeff=self.entropy_coeff, gradient_clip=0, recurrent_model=recurrent_model, seq_length=max_seq_length) if actor_updater is None else actor_updater
         critic_updater = TwinCriticSoftQLearning(model=model, device=device, optimizer=critic_optimizer, entropy_coeff=self.entropy_coeff, gradient_clip=1.0, recurrent_model=recurrent_model, seq_length=max_seq_length) if critic_updater is None else critic_updater
@@ -193,7 +195,7 @@ class SAC(ddpg.DDPG):
         self.is_dict_obs = isinstance(model.obs_space, spaces.Dict)
         
         super().__init__(action_space=action_space, model=model, recurrent_model=recurrent_model, max_seq_length=max_seq_length, num_workers=num_workers, seed=seed, replay=replay, exploration=exploration,
-            actor_updater=actor_updater, critic_updater=critic_updater, device=device, config=config)
+            actor_updater=actor_updater, critic_updater=critic_updater, device=device, config=config, symmetry_fn=symmetry_fn)
 
     def _ensure_actor_tensor(self, observations):
         if self.is_dict_obs and isinstance(observations, dict):

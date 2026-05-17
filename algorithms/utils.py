@@ -548,8 +548,8 @@ class DecayingEntropyCoeff:
         self.minimum = minimum
         self.decay_rate = decay_rate
         self.start_steps = start_steps
-        self.step = 0  # Initialize step counter
-        self.value = initial  # Initial value of the coefficient
+        self.step = 0
+        self.value = initial
 
     def __call__(self):
         self.step += 1
@@ -560,9 +560,44 @@ class DecayingEntropyCoeff:
         self.value = max(self.minimum, decayed)
         return max(self.minimum, decayed)
 
-    def update(self):
-        # For compatibility with other updaters
+    def update(self, log_probs=None):
         return self()
+
+
+class AutoEntropyCoeff:
+    """SAC automatic temperature tuning via Lagrangian dual optimization.
+
+    Minimises L_α = E[-α * (log π(a|s) + H_target)]
+    where H_target = -action_dim (heuristic from Haarnoja et al. 2018).
+    Alpha adapts: rises when entropy is below target, falls when policy converges.
+    """
+    def __init__(self, action_dim, initial_log_alpha=0.0, lr=3e-4, device=torch.device("cpu")):
+        self.target_entropy = -float(action_dim)
+        self.log_alpha = torch.nn.Parameter(
+            torch.tensor(initial_log_alpha, dtype=torch.float32, device=device)
+        )
+        self.optimizer = torch.optim.Adam([self.log_alpha], lr=lr)
+        self.value = float(self.log_alpha.exp().item())
+
+    def update(self, log_probs=None):
+        if log_probs is None:
+            return
+        alpha_loss = -(self.log_alpha * (log_probs.detach() + self.target_entropy)).mean()
+        self.optimizer.zero_grad()
+        alpha_loss.backward()
+        self.optimizer.step()
+        self.value = float(self.log_alpha.exp().item())
+
+    def state_dict(self):
+        return {
+            "log_alpha": self.log_alpha.data.clone(),
+            "optimizer": self.optimizer.state_dict(),
+        }
+
+    def load_state_dict(self, sd):
+        self.log_alpha.data.copy_(sd["log_alpha"])
+        self.optimizer.load_state_dict(sd["optimizer"])
+        self.value = float(self.log_alpha.exp().item())
     
 class NormalActionNoise:
     def __init__(self, policy, action_space, scale=0.3, min_scale=0.03, decay_rate=0.000001, start_steps=10000, seed=None, device=torch.device("cpu")):

@@ -152,7 +152,8 @@ class DDPG():
     DDPG: https://arxiv.org/pdf/1509.02971.pdf
     '''
     def __init__(
-        self, action_space, model, recurrent_model=False, max_seq_length=1, num_workers=1, seed=None, replay=None, actor_updater=None, critic_updater=None, exploration=None, actor_optimizer=None, critic_optimizer=None, device=torch.device("cpu"), config=None
+        self, action_space, model, recurrent_model=False, max_seq_length=1, num_workers=1, seed=None, replay=None, actor_updater=None, critic_updater=None, exploration=None, actor_optimizer=None, critic_optimizer=None, device=torch.device("cpu"), config=None,
+        symmetry_fn=None,
     ):
         self.config = config
         self.model = model
@@ -194,10 +195,13 @@ class DDPG():
         
         self.is_dict_obs = isinstance(model.obs_space, spaces.Dict)
         if self.is_dict_obs:
-            self.keys = ('observations_actor', 'observations_critic', 'actions', 
+            self.keys = ('observations_actor', 'observations_critic', 'actions',
                          'next_observations_actor', 'next_observations_critic', 'rewards', 'discounts')
         else:
             self.keys = ('observations', 'actions', 'next_observations', 'rewards', 'discounts')
+
+        # Optional symmetry augmentation: callable(obs_dict, actions) -> (mirror_obs, mirror_actions)
+        self.symmetry_fn = symmetry_fn
 
     def save(self, path):
         path = path + '.pt'
@@ -269,6 +273,15 @@ class DDPG():
             observations=self.last_observations, actions=self.last_actions,
             next_observations=observations, rewards=rewards, resets=resets,
             terminations=terminations)
+
+        # Symmetry augmentation: store the left-right mirrored transition for free.
+        if self.symmetry_fn is not None:
+            mirror_last_obs, mirror_last_actions = self.symmetry_fn(self.last_observations, self.last_actions)
+            mirror_next_obs, _ = self.symmetry_fn(observations, self.last_actions)
+            self.replay.store(
+                observations=mirror_last_obs, actions=mirror_last_actions,
+                next_observations=mirror_next_obs, rewards=rewards, resets=resets,
+                terminations=terminations)
 
         # Prepare to update the normalizers.
         if self.is_dict_obs:
