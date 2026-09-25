@@ -7,6 +7,15 @@ try:
 except ImportError:
     from torch_rl_algorithms.algorithms.utils import Buffer, NormalActionNoise, to_tensor
 
+def _concat_workers(a, b):
+    """Concatenate two same-shaped batches along the worker axis (dim 0)."""
+    if isinstance(a, dict):
+        return {k: _concat_workers(a[k], b[k]) for k in a}
+    if torch.is_tensor(a):
+        return torch.cat([a, b], dim=0)
+    return np.concatenate([a, b], axis=0)
+
+
 class DeterministicPolicyGradient:
     def __init__(self, model, device=torch.device("cpu"), seq_length=1, optimizer=None, gradient_clip=0, recurrent_model = False):
         self.device = device
@@ -269,18 +278,27 @@ class DDPG():
             observations = observations.reshape(observations.shape[0], -1)
             
         # Store the last transitions in the replay.
-        self.replay.store(
-            observations=self.last_observations, actions=self.last_actions,
-            next_observations=observations, rewards=rewards, resets=resets,
-            terminations=terminations)
-
-        # Symmetry augmentation: store the left-right mirrored transition for free.
         if self.symmetry_fn is not None:
+            # The mirrored transition must be concatenated along the WORKER axis, not written
+            # as a second row. store() writes one full row across all worker columns and then
+            # advances the row index, so a second store() call lands the mirror in the NEXT
+            # row -- and accumulate_n_steps walks backward over rows assuming row r-1 is the
+            # previous timestep. That folds the mirror's reward into the real transition's
+            # n-step return: every reward gets counted twice, the effective horizon is halved,
+            # and the discount bootstraps against the wrong state.
             mirror_last_obs, mirror_last_actions = self.symmetry_fn(self.last_observations, self.last_actions)
             mirror_next_obs, _ = self.symmetry_fn(observations, self.last_actions)
             self.replay.store(
-                observations=mirror_last_obs, actions=mirror_last_actions,
-                next_observations=mirror_next_obs, rewards=rewards, resets=resets,
+                observations=_concat_workers(self.last_observations, mirror_last_obs),
+                actions=_concat_workers(self.last_actions, mirror_last_actions),
+                next_observations=_concat_workers(observations, mirror_next_obs),
+                rewards=_concat_workers(rewards, rewards),
+                resets=_concat_workers(resets, resets),
+                terminations=_concat_workers(terminations, terminations))
+        else:
+            self.replay.store(
+                observations=self.last_observations, actions=self.last_actions,
+                next_observations=observations, rewards=rewards, resets=resets,
                 terminations=terminations)
 
         # Prepare to update the normalizers.
@@ -318,19 +336,19 @@ class DDPG():
         return self._greedy_actions(observations)
 
     def _update(self, steps):
-        actor_loss = 0
-        critic_loss = 0
-        # Update both the actor and the critic multiple times.
+        sums = {}
+        batches = 0
         for batch in self.replay.get(*self.keys, steps=steps):
             batch = {k: torch.as_tensor(v) for k, v in batch.items()}
             infos = self._update_actor_critic(steps=steps, **batch)
+            batches += 1
+            for group, group_infos in infos.items():
+                for name, value in group_infos.items():
+                    key = f'{group}_{name}'
+                    sums[key] = sums.get(key, 0) + value
 
-            actor_loss += infos['actor']['loss']
-            critic_loss += infos['critic']['loss']
+        averaged = {k: v / max(batches, 1) for k, v in sums.items()}
 
-        actor_loss /= self.replay.batch_iterations
-        critic_loss /= self.replay.batch_iterations
-        
         # Update the normalizers.
         if self.model.observation_normalizer:
             self.model.observation_normalizer.update()
@@ -338,13 +356,12 @@ class DDPG():
             self.model.actor_observation_normalizer.update()
         if hasattr(self.model, 'critic_observation_normalizer') and self.model.critic_observation_normalizer:
             self.model.critic_observation_normalizer.update()
-            
+
         if self.model.return_normalizer:
             self.model.return_normalizer.update()
 
         self.model.update_targets()
-        return dict(
-            actor_loss=actor_loss.detach(), critic_loss=critic_loss.detach())
+        return averaged
         
     def _update_actor_critic(self, **kwargs):
         steps = kwargs.pop('steps', 0)

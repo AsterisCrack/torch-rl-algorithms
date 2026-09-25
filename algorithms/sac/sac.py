@@ -75,13 +75,20 @@ class TwinCriticSoftDeterministicPolicyGradient:
 
         loss.backward()
         if self.gradient_clip > 0:
-            torch.nn.utils.clip_grad_norm_(self.variables, self.gradient_clip)
+            grad_norm = torch.nn.utils.clip_grad_norm_(self.variables, self.gradient_clip)
+        else:
+            grad_norm = torch.nn.utils.clip_grad_norm_(self.variables, float('inf'))
         self.optimizer.step(loss.item(), steps=steps)
 
         for var in critic_variables:
             var.requires_grad = True
 
-        return dict(loss=loss.detach())
+        return dict(
+            loss=loss.detach(),
+            grad_norm=grad_norm.detach(),
+            log_prob=log_probs.mean().detach(),
+            q=values.mean().detach(),
+        )
 
 class TwinCriticSoftQLearning:
     def __init__(
@@ -168,11 +175,21 @@ class TwinCriticSoftQLearning:
 
         loss.backward()
         if self.gradient_clip > 0:
-            torch.nn.utils.clip_grad_norm_(self.variables, self.gradient_clip)
+            grad_norm = torch.nn.utils.clip_grad_norm_(self.variables, self.gradient_clip)
+        else:
+            grad_norm = torch.nn.utils.clip_grad_norm_(self.variables, float('inf'))
         self.optimizer.step(loss.item(), steps=steps)
 
         return dict(
-            loss=loss.detach(), q1=values_1.detach(), q2=values_2.detach())
+            loss=loss.detach(),
+            grad_norm=grad_norm.detach(),
+            alpha=torch.as_tensor(float(self.entropy_coeff.value)),
+            mean_q=values_1.mean().detach(),
+            max_abs_q=values_1.abs().max().detach(),
+            mean_target=returns.mean().detach(),
+            max_abs_target=returns.abs().max().detach(),
+            mean_log_prob=next_log_probs.mean().detach(),
+        )
        
 class SAC(ddpg.DDPG):
     '''Soft Actor-Critic.
