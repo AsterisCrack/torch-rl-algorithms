@@ -470,7 +470,10 @@ class MPO():
         if resets is not None:
             self.reset_observations(resets)
 
-    def update(self, observations, rewards, resets, terminations, steps):
+    # **kwargs is required: Trainer.run calls agent.update(**infos, steps=...), and infos
+    # carries extra keys (next_observations_actor, log, ...) that DDPG/SAC absorb but this
+    # signature would reject with a TypeError.
+    def update(self, observations, rewards, resets, terminations, steps, **kwargs):
         # Store the last transitions in the replay.
         # If the model is recurrent we need to change the observations to include it correctly in the replay.
         if self.recurrent_model:
