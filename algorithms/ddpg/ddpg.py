@@ -1,4 +1,5 @@
 import os
+import inspect
 import torch
 import numpy as np
 from gymnasium import spaces
@@ -200,6 +201,12 @@ class DDPG():
             self.exploration = NormalActionNoise(self._policy, action_space, seed=seed, device=device, **noise_kwargs)
 
         self.actor_updater = DeterministicPolicyGradient(model=model, device=device, optimizer=actor_optimizer) if actor_updater is None else actor_updater
+        # Only pass next_observations to actor updaters that accept it (e.g. SAC with CAPS).
+        self._actor_takes_next_obs = 'next_observations' in inspect.signature(self.actor_updater.__call__).parameters
+        # CAPS temporal needs the true 1-step next obs and the raw reset flag. The replay's n-step
+        # accumulation overwrites every key containing 'next_observations', so store them under other
+        # names. Only stored when the actor updater has a temporal weight > 0.
+        self._store_caps = self._actor_takes_next_obs and getattr(self.actor_updater, 'caps_temporal_weight', 0.0) > 0
         self.critic_updater = DeterministicQLearning(model=model, device=device, optimizer=critic_optimizer) if critic_updater is None else critic_updater
         
         self.is_dict_obs = isinstance(model.obs_space, spaces.Dict)
@@ -208,6 +215,9 @@ class DDPG():
                          'next_observations_actor', 'next_observations_critic', 'rewards', 'discounts')
         else:
             self.keys = ('observations', 'actions', 'next_observations', 'rewards', 'discounts')
+
+        if self._store_caps:
+            self.keys = self.keys + ('caps_next_actor', 'caps_reset')
 
         # Optional symmetry augmentation: callable(obs_dict, actions) -> (mirror_obs, mirror_actions)
         self.symmetry_fn = symmetry_fn
@@ -278,6 +288,12 @@ class DDPG():
             observations = observations.reshape(observations.shape[0], -1)
             
         # Store the last transitions in the replay.
+        caps_extra = {}
+        caps_extra_mirror = {}
+        mirror_last_obs = None   # also feeds the stage-2 normaliser statistics below
+        if self._store_caps:
+            next_actor = observations['actor'] if self.is_dict_obs else observations
+            caps_extra = dict(caps_next_actor=next_actor, caps_reset=resets)
         if self.symmetry_fn is not None:
             # The mirrored transition must be concatenated along the WORKER axis, not written
             # as a second row. store() writes one full row across all worker columns and then
@@ -288,27 +304,41 @@ class DDPG():
             # and the discount bootstraps against the wrong state.
             mirror_last_obs, mirror_last_actions = self.symmetry_fn(self.last_observations, self.last_actions)
             mirror_next_obs, _ = self.symmetry_fn(observations, self.last_actions)
+            if self._store_caps:
+                mirror_next_actor = mirror_next_obs['actor'] if self.is_dict_obs else mirror_next_obs
+                caps_extra = dict(
+                    caps_next_actor=_concat_workers(next_actor, mirror_next_actor),
+                    caps_reset=_concat_workers(resets, resets))
             self.replay.store(
                 observations=_concat_workers(self.last_observations, mirror_last_obs),
                 actions=_concat_workers(self.last_actions, mirror_last_actions),
                 next_observations=_concat_workers(observations, mirror_next_obs),
                 rewards=_concat_workers(rewards, rewards),
                 resets=_concat_workers(resets, resets),
-                terminations=_concat_workers(terminations, terminations))
+                terminations=_concat_workers(terminations, terminations), **caps_extra)
         else:
             self.replay.store(
                 observations=self.last_observations, actions=self.last_actions,
                 next_observations=observations, rewards=rewards, resets=resets,
-                terminations=terminations)
+                terminations=terminations, **caps_extra)
 
-        # Prepare to update the normalizers.
+        # Prepare to update the normalizers. With symmetry augmentation the mirrored observations are
+        # recorded too (equal counts), so the stage-2 mean/std stay mirror-symmetric, matching the
+        # replay content. The inputs here are the stage-1 normalised obs; with symmetric stage-1
+        # statistics their mirror is exactly the normalised mirrored raw obs.
         if self.is_dict_obs:
             if hasattr(self.model, 'actor_observation_normalizer') and self.model.actor_observation_normalizer:
                 self.model.actor_observation_normalizer.record(self.last_observations['actor'])
+                if mirror_last_obs is not None:
+                    self.model.actor_observation_normalizer.record(mirror_last_obs['actor'])
             if hasattr(self.model, 'critic_observation_normalizer') and self.model.critic_observation_normalizer:
                 self.model.critic_observation_normalizer.record(self.last_observations['critic'])
+                if mirror_last_obs is not None:
+                    self.model.critic_observation_normalizer.record(mirror_last_obs['critic'])
         elif self.model.observation_normalizer:
             self.model.observation_normalizer.record(self.last_observations)
+            if mirror_last_obs is not None:
+                self.model.observation_normalizer.record(mirror_last_obs)
 
         if self.model.return_normalizer:
             self.model.return_normalizer.record(rewards)
@@ -363,6 +393,13 @@ class DDPG():
         self.model.update_targets()
         return averaged
         
+    def _actor_extra_kwargs(self, kwargs):
+        if not self._store_caps:
+            return {}
+        next_actor = torch.as_tensor(kwargs['caps_next_actor'], dtype=torch.float32).to(self.device)
+        resets = torch.as_tensor(kwargs['caps_reset'], dtype=torch.float32).to(self.device)
+        return dict(next_observations=next_actor, resets=resets)
+
     def _update_actor_critic(self, **kwargs):
         steps = kwargs.pop('steps', 0)
         if self.is_dict_obs:
@@ -380,7 +417,7 @@ class DDPG():
                 next_actor_observations=next_observations,
                 steps=steps
             )
-            actor_infos = self.actor_updater(observations, critic_observations=critic_observations, steps=steps)
+            actor_infos = self.actor_updater(observations, critic_observations=critic_observations, steps=steps, **self._actor_extra_kwargs(kwargs))
         else:
             observations = kwargs['observations']
             actions = kwargs['actions']
@@ -395,6 +432,6 @@ class DDPG():
             discounts = torch.as_tensor(discounts, dtype=torch.float32).to(self.device)
             
             critic_infos = self.critic_updater(observations, actions, next_observations, rewards, discounts, steps=steps)
-            actor_infos = self.actor_updater(observations, steps=steps)
+            actor_infos = self.actor_updater(observations, steps=steps, **self._actor_extra_kwargs(kwargs))
 
-        return dict(critic=critic_infos, actor=actor_infos)
+        return dict(critic=critic_infos, actor=actor_infos)

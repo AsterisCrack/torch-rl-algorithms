@@ -9,13 +9,27 @@ except ImportError:
     from torch_rl_algorithms.algorithms.utils import NoActionNoise, DecayingEntropyCoeff, AutoEntropyCoeff, to_tensor
 
 class TwinCriticSoftDeterministicPolicyGradient:
-    def __init__(self, model, action_space, device=torch.device("cpu"), seq_length=1, optimizer=None, entropy_coeff=DecayingEntropyCoeff(), gradient_clip=0, recurrent_model = False):
+    def __init__(self, model, action_space, device=torch.device("cpu"), seq_length=1, optimizer=None, entropy_coeff=DecayingEntropyCoeff(), gradient_clip=0, recurrent_model = False, caps_temporal_weight=0.0, caps_spatial_weight=0.0, caps_spatial_sigma=0.05, symmetry_loss_weight=0.0, mirror_fn=None):
         self.device = device
         self.recurrent_model = recurrent_model
         self.seq_length = seq_length
         self.optimizer = (lambda params: torch.optim.Adam(params, lr=3e-4)) if optimizer is None else optimizer
         self.entropy_coeff = entropy_coeff
         self.gradient_clip = gradient_clip
+        # CAPS smoothness regularization (Mysore et al. 2021), off when weights are 0.
+        self.caps_temporal_weight = caps_temporal_weight
+        self.caps_spatial_weight = caps_spatial_weight
+        self.caps_spatial_sigma = caps_spatial_sigma
+        # Explicit mirror-symmetry loss (Yu et al. 2018), off when the weight is 0.
+        # mirror_fn(actor_obs, actions) -> (mirrored_actor_obs, mirrored_actions), same transform as
+        # the replay symmetry augmentation, acting on the observations as they reach the actor.
+        self.symmetry_loss_weight = symmetry_loss_weight
+        self.mirror_fn = mirror_fn
+        if self.symmetry_loss_weight > 0 and self.mirror_fn is None:
+            raise ValueError(
+                "symmetry_loss_weight > 0 requires a mirror function (symmetry_fn), but none is available. "
+                "Set train.symmetry_augmentation: True and use an env that provides mirror_obs/mirror_action, "
+                "or set train.symmetry_loss_weight: 0.")
 
         self.model = model
         self.variables = [param for param in self.model.actor.parameters() if param.requires_grad]
@@ -45,7 +59,7 @@ class TwinCriticSoftDeterministicPolicyGradient:
         self.optimizer.load_state_dict(checkpoint['optimizer'])
         print(f"Loaded mpo model from {path}")
         
-    def __call__(self, observations, critic_observations=None, steps=0):
+    def __call__(self, observations, critic_observations=None, steps=0, next_observations=None, resets=None):
         critic_1_variables = [param for param in self.model.critic_1.parameters() if param.requires_grad]
         critic_2_variables = [param for param in self.model.critic_2.parameters() if param.requires_grad]
         critic_variables = critic_1_variables + critic_2_variables
@@ -73,6 +87,44 @@ class TwinCriticSoftDeterministicPolicyGradient:
         values = torch.min(values_1, values_2)
         loss = (self.entropy_coeff.value * log_probs - values).mean()
 
+        caps_temporal = torch.zeros((), device=observations.device)
+        caps_spatial = torch.zeros((), device=observations.device)
+        use_caps = self.caps_temporal_weight > 0 or self.caps_spatial_weight > 0
+        if use_caps and not self.recurrent_model:
+            # Deterministic (squashed) action mean; gradients flow through every term.
+            mu = distributions.mean
+            if self.caps_temporal_weight > 0 and next_observations is not None:
+                next_mu = self.model.actor(next_observations).mean
+                sq = torch.square(mu - next_mu).sum(dim=-1)
+                if resets is not None:
+                    # DirectRLEnv auto-resets, so the next obs of a reset row is an unrelated state
+                    keep = 1.0 - resets
+                    caps_temporal = (keep * sq).sum() / keep.sum().clamp(min=1.0)
+                else:
+                    caps_temporal = sq.mean()
+                loss = loss + self.caps_temporal_weight * caps_temporal
+            if self.caps_spatial_weight > 0:
+                # The actor normalizes its own input, so scale the noise by the normalizer std
+                # to get sigma in the normalized space the network consumes.
+                noise = torch.randn_like(observations) * self.caps_spatial_sigma
+                normalizer = getattr(self.model.actor.torso, 'observation_normalizer', None)
+                if normalizer is not None:
+                    noise = noise * normalizer._std
+                noisy_mu = self.model.actor(observations + noise).mean
+                caps_spatial = torch.square(mu - noisy_mu).sum(dim=-1).mean()
+                loss = loss + self.caps_spatial_weight * caps_spatial
+        # Recurrent actors take sequence-shaped inputs, so CAPS is skipped for them.
+
+        symmetry_loss = torch.zeros((), device=observations.device)
+        if self.symmetry_loss_weight > 0 and not self.recurrent_model:
+            # L_sym = mean_batch(sum_a (mu(M_s s) - M_a mu(s))^2) on the deterministic tanh mean;
+            # gradients flow through both branches.
+            mu = distributions.mean
+            mirrored_obs, mirrored_mu = self.mirror_fn(observations, mu)
+            mu_of_mirror = self.model.actor(mirrored_obs).mean
+            symmetry_loss = torch.square(mu_of_mirror - mirrored_mu).sum(dim=-1).mean()
+            loss = loss + self.symmetry_loss_weight * symmetry_loss
+
         loss.backward()
         if self.gradient_clip > 0:
             grad_norm = torch.nn.utils.clip_grad_norm_(self.variables, self.gradient_clip)
@@ -88,6 +140,9 @@ class TwinCriticSoftDeterministicPolicyGradient:
             grad_norm=grad_norm.detach(),
             log_prob=log_probs.mean().detach(),
             q=values.mean().detach(),
+            caps_temporal=caps_temporal.detach(),
+            caps_spatial=caps_spatial.detach(),
+            symmetry_loss=symmetry_loss.detach(),
         )
 
 class TwinCriticSoftQLearning:
@@ -205,7 +260,24 @@ class SAC(ddpg.DDPG):
         action_dim = action_space.shape[0]
         self.entropy_coeff = AutoEntropyCoeff(action_dim=action_dim, device=device)
         exploration = NoActionNoise(policy=self._policy, action_space=action_space, seed=seed, device=device) if exploration is None else exploration
-        actor_updater = TwinCriticSoftDeterministicPolicyGradient(model=model, action_space=action_space, device=device, optimizer=actor_optimizer, entropy_coeff=self.entropy_coeff, gradient_clip=0, recurrent_model=recurrent_model, seq_length=max_seq_length) if actor_updater is None else actor_updater
+        train_cfg = getattr(config, 'train', None)
+        caps_kwargs = dict(
+            caps_temporal_weight=getattr(train_cfg, 'caps_temporal_weight', 0.0),
+            caps_spatial_weight=getattr(train_cfg, 'caps_spatial_weight', 0.0),
+            caps_spatial_sigma=getattr(train_cfg, 'caps_spatial_sigma', 0.05),
+        )
+        # Explicit mirror loss: reuse the augmentation's symmetry_fn on the actor observations only.
+        symmetry_loss_weight = getattr(train_cfg, 'symmetry_loss_weight', 0.0)
+        mirror_fn = None
+        if symmetry_fn is not None:
+            from gymnasium import spaces
+            _dict_obs = isinstance(model.obs_space, spaces.Dict)
+            def mirror_fn(actor_obs, actions):
+                # symmetry_fn mirrors obs dicts; for dict-obs models pass/take only the actor part
+                mirrored, mirrored_actions = symmetry_fn({'actor': actor_obs} if _dict_obs else actor_obs, actions)
+                return (mirrored['actor'] if _dict_obs else mirrored), mirrored_actions
+        caps_kwargs.update(symmetry_loss_weight=symmetry_loss_weight, mirror_fn=mirror_fn)
+        actor_updater = TwinCriticSoftDeterministicPolicyGradient(model=model, action_space=action_space, device=device, optimizer=actor_optimizer, entropy_coeff=self.entropy_coeff, gradient_clip=0, recurrent_model=recurrent_model, seq_length=max_seq_length, **caps_kwargs) if actor_updater is None else actor_updater
         critic_updater = TwinCriticSoftQLearning(model=model, device=device, optimizer=critic_optimizer, entropy_coeff=self.entropy_coeff, gradient_clip=1.0, recurrent_model=recurrent_model, seq_length=max_seq_length) if critic_updater is None else critic_updater
         
         from gymnasium import spaces
@@ -237,4 +309,4 @@ class SAC(ddpg.DDPG):
             observations = observations.reshape(observations.shape[0], self.seq_length, -1)
             observations = observations.transpose(0, 1)
         with torch.no_grad():
-            return self.model.actor(observations).loc
+            return self.model.actor(observations).loc
