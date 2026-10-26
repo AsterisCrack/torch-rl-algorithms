@@ -75,8 +75,22 @@ class BaseActorCritic(nn.Module):
                 target_param.data.copy_(param.data)
 
     def update_targets(self):
-        """ Soft update of target networks. """
+        """ Soft update of target networks: target <- (1 - c) target + c source, as one fused op. """
         with torch.no_grad():
+            pairs = getattr(self, "_target_lists", None)
+            if pairs is None:
+                # The Parameter objects, not .data: they survive .to(device) / load_state_dict.
+                tgt, src = [], []
+                for target, source in self._get_sync_pairs():
+                    for target_param, param in zip(target.parameters(), source.parameters()):
+                        tgt.append(target_param)
+                        src.append(param)
+                # A target tensor listed twice would be lerped twice by the old loop; keep that case on it.
+                pairs = (tgt, src) if len({t.data_ptr() for t in tgt}) == len(tgt) else False
+                self._target_lists = pairs
+            if pairs:
+                torch._foreach_lerp_(pairs[0], pairs[1], self.target_coeff)
+                return
             for target, source in self._get_sync_pairs():
                 for target_param, param in zip(target.parameters(), source.parameters()):
                     target_param.data.mul_(1 - self.target_coeff)

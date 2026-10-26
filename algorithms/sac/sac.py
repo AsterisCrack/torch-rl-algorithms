@@ -3,10 +3,26 @@ import torch
 import numpy as np
 try:
     import algorithms.ddpg.ddpg as ddpg
-    from algorithms.utils import NoActionNoise, DecayingEntropyCoeff, AutoEntropyCoeff, to_tensor
+    from algorithms.utils import NoActionNoise, DecayingEntropyCoeff, AutoEntropyCoeff, SquashedMultivariateNormalDiag, to_tensor
 except ImportError:
     import torch_rl_algorithms.algorithms.ddpg.ddpg as ddpg
-    from torch_rl_algorithms.algorithms.utils import NoActionNoise, DecayingEntropyCoeff, AutoEntropyCoeff, to_tensor
+    from torch_rl_algorithms.algorithms.utils import NoActionNoise, DecayingEntropyCoeff, AutoEntropyCoeff, SquashedMultivariateNormalDiag, to_tensor
+
+
+def _batched_actor_forward(actor, parts):
+    """actor over torch.cat(parts) in ONE forward -> (distribution of parts[0], [squashed mean of each part]).
+
+    Row-wise networks (MLP, the equivariant wrapper) give every row the same value and gradient as a
+    separate forward; this only saves kernel launches. Distributions other than
+    SquashedMultivariateNormalDiag cannot be split here, so those fall back to separate forwards."""
+    sizes = [p.shape[0] for p in parts]
+    out = actor(torch.cat(parts, dim=0))
+    if isinstance(out, SquashedMultivariateNormalDiag):
+        locs = out._distribution.loc.split(sizes)
+        scales = out._distribution.scale.split(sizes)
+        return SquashedMultivariateNormalDiag(locs[0], scales[0]), [torch.tanh(loc) for loc in locs]
+    first = actor(parts[0])
+    return first, [first.mean] + [actor(p).mean for p in parts[1:]]
 
 class TwinCriticSoftDeterministicPolicyGradient:
     def __init__(self, model, action_space, device=torch.device("cpu"), seq_length=1, optimizer=None, entropy_coeff=DecayingEntropyCoeff(), gradient_clip=0, recurrent_model = False, caps_temporal_weight=0.0, caps_spatial_weight=0.0, caps_spatial_sigma=0.05, symmetry_loss_weight=0.0, mirror_fn=None):
@@ -72,7 +88,33 @@ class TwinCriticSoftDeterministicPolicyGradient:
             observations = observations.transpose(0, 1)
             
         self.optimizer.zero_grad()
-        distributions = self.model.actor(observations)
+        use_caps = self.caps_temporal_weight > 0 or self.caps_spatial_weight > 0
+        caps_temporal_on = use_caps and not self.recurrent_model and self.caps_temporal_weight > 0 and next_observations is not None
+        caps_spatial_on = use_caps and not self.recurrent_model and self.caps_spatial_weight > 0
+        next_mu = noisy_mu = None
+        if caps_spatial_on:
+            # The actor normalizes its own input, so scale the noise by the normalizer std
+            # to get sigma in the normalized space the network consumes.
+            noise = torch.randn_like(observations) * self.caps_spatial_sigma
+            normalizer = getattr(self.model.actor.torso, 'observation_normalizer', None)
+            if normalizer is not None:
+                noise = noise * normalizer._std
+        if caps_temporal_on or caps_spatial_on:
+            # One actor forward over [s; s'; s + eps] instead of three. The MLP acts row-wise, so
+            # every row gets exactly the values (and gradients) the separate forwards gave.
+            parts = [observations]
+            if caps_temporal_on:
+                parts.append(next_observations)
+            if caps_spatial_on:
+                parts.append(observations + noise)
+            distributions, means = _batched_actor_forward(self.model.actor, parts)
+            k = 1
+            if caps_temporal_on:
+                next_mu, k = means[k], k + 1
+            if caps_spatial_on:
+                noisy_mu = means[k]
+        else:
+            distributions = self.model.actor(observations)
         if hasattr(distributions, 'rsample_with_log_prob'):
             actions, log_probs = distributions.rsample_with_log_prob()
         else:
@@ -89,12 +131,10 @@ class TwinCriticSoftDeterministicPolicyGradient:
 
         caps_temporal = torch.zeros((), device=observations.device)
         caps_spatial = torch.zeros((), device=observations.device)
-        use_caps = self.caps_temporal_weight > 0 or self.caps_spatial_weight > 0
         if use_caps and not self.recurrent_model:
             # Deterministic (squashed) action mean; gradients flow through every term.
             mu = distributions.mean
-            if self.caps_temporal_weight > 0 and next_observations is not None:
-                next_mu = self.model.actor(next_observations).mean
+            if caps_temporal_on:
                 sq = torch.square(mu - next_mu).sum(dim=-1)
                 if resets is not None:
                     # DirectRLEnv auto-resets, so the next obs of a reset row is an unrelated state
@@ -103,14 +143,7 @@ class TwinCriticSoftDeterministicPolicyGradient:
                 else:
                     caps_temporal = sq.mean()
                 loss = loss + self.caps_temporal_weight * caps_temporal
-            if self.caps_spatial_weight > 0:
-                # The actor normalizes its own input, so scale the noise by the normalizer std
-                # to get sigma in the normalized space the network consumes.
-                noise = torch.randn_like(observations) * self.caps_spatial_sigma
-                normalizer = getattr(self.model.actor.torso, 'observation_normalizer', None)
-                if normalizer is not None:
-                    noise = noise * normalizer._std
-                noisy_mu = self.model.actor(observations + noise).mean
+            if caps_spatial_on:
                 caps_spatial = torch.square(mu - noisy_mu).sum(dim=-1).mean()
                 loss = loss + self.caps_spatial_weight * caps_spatial
         # Recurrent actors take sequence-shaped inputs, so CAPS is skipped for them.
@@ -130,7 +163,7 @@ class TwinCriticSoftDeterministicPolicyGradient:
             grad_norm = torch.nn.utils.clip_grad_norm_(self.variables, self.gradient_clip)
         else:
             grad_norm = torch.nn.utils.clip_grad_norm_(self.variables, float('inf'))
-        self.optimizer.step(loss.item(), steps=steps)
+        self.optimizer.step(loss.detach(), steps=steps)   # no .item(): only a plateau scheduler reads it
 
         for var in critic_variables:
             var.requires_grad = True
@@ -233,12 +266,12 @@ class TwinCriticSoftQLearning:
             grad_norm = torch.nn.utils.clip_grad_norm_(self.variables, self.gradient_clip)
         else:
             grad_norm = torch.nn.utils.clip_grad_norm_(self.variables, float('inf'))
-        self.optimizer.step(loss.item(), steps=steps)
+        self.optimizer.step(loss.detach(), steps=steps)   # no .item(): only a plateau scheduler reads it
 
         return dict(
             loss=loss.detach(),
             grad_norm=grad_norm.detach(),
-            alpha=torch.as_tensor(float(self.entropy_coeff.value)),
+            alpha=torch.as_tensor(self.entropy_coeff.value).detach(),
             mean_q=values_1.mean().detach(),
             max_abs_q=values_1.abs().max().detach(),
             mean_target=returns.mean().detach(),

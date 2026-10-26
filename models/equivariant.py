@@ -126,10 +126,14 @@ class EquivariantActor(nn.Module):
     def loc_scale(self, obs):
         """Symmetrised pre-squash (loc, scale)."""
         self._check_ready()
-        d1 = self.net(obs)._distribution
-        d2 = self.net(self.mirror_obs(obs))._distribution
-        loc = 0.5 * (d1.loc + self.mirror_action(d2.loc))
-        scale = 0.5 * (d1.scale + d2.scale.index_select(-1, self.mirror_act_perm))
+        # f(s) and f(M s) in ONE forward over the batch [s; M s] (dim 0 is the batch). The network
+        # acts row-wise, so this equals two separate forwards; it halves the kernel launches.
+        n = obs.shape[0]
+        d = self.net(torch.cat([obs, self.mirror_obs(obs)], dim=0))._distribution
+        loc1, loc2 = d.loc[:n], d.loc[n:]
+        scale1, scale2 = d.scale[:n], d.scale[n:]
+        loc = 0.5 * (loc1 + self.mirror_action(loc2))
+        scale = 0.5 * (scale1 + scale2.index_select(-1, self.mirror_act_perm))
         return loc, scale
 
     def forward(self, observations):

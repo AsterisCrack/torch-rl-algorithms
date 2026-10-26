@@ -79,13 +79,14 @@ class OptimizerWithScheduler(torch.optim.Optimizer):
     def step(self, metrics=None, steps=0):
         # Get current LRs before scheduler step
         old_lrs = [group["lr"] for group in self.optimizer.param_groups]
-        
+
         self.optimizer.step()
-        
+
         if self.scheduler is not None and steps >= self.start_step:
             if isinstance(self.scheduler, lr_scheduler.ReduceLROnPlateau):
                 if metrics is not None:
-                    self.scheduler.step(metrics)
+                    # metrics may be a GPU tensor: converted (one sync) only here, where it is used
+                    self.scheduler.step(float(metrics))
             else:
                 self.scheduler.step()
             
@@ -426,7 +427,10 @@ class CategoricalWithSupport:
     
 class SquashedMultivariateNormalDiag:
     def __init__(self, loc, scale):
-        self._distribution = torch.distributions.normal.Normal(loc, scale)
+        # validate_args=False: the default argument check (scale > 0, finite loc) does a host-device
+        # sync per construction and per log_prob -- ~250 syncs per training iteration. The actor head
+        # clamps scale to [1e-4, 1] itself.
+        self._distribution = torch.distributions.normal.Normal(loc, scale, validate_args=False)
 
     def rsample_with_log_prob(self, shape=()):
         samples = self._distribution.rsample(shape)
@@ -533,9 +537,9 @@ class MeanStd(torch.nn.Module):
 
     def _compute_std(self, mean, mean_sq):
         var = mean_sq - torch.square(mean)
-        var = torch.maximum(var, torch.tensor(0.0, device=var.device))
+        var = torch.clamp(var, min=0.0)                # clamp, not maximum(x, torch.tensor(...)): no H2D copy
         std = torch.sqrt(var)
-        std = torch.maximum(std, torch.tensor(self.eps, device=std.device))
+        std = torch.clamp(std, min=self.eps)
         return std
 
     def _update(self, mean, std):
@@ -577,7 +581,9 @@ class AutoEntropyCoeff:
             torch.tensor(initial_log_alpha, dtype=torch.float32, device=device)
         )
         self.optimizer = torch.optim.Adam([self.log_alpha], lr=lr)
-        self.value = float(self.log_alpha.exp().item())
+        # value is a detached 0-dim tensor on the device (same number as the old float(...item()),
+        # without a host sync every update). float(self.value) where a Python number is needed.
+        self.value = self.log_alpha.detach().exp()
 
     def update(self, log_probs=None):
         if log_probs is None:
@@ -586,7 +592,7 @@ class AutoEntropyCoeff:
         self.optimizer.zero_grad()
         alpha_loss.backward()
         self.optimizer.step()
-        self.value = float(self.log_alpha.exp().item())
+        self.value = self.log_alpha.detach().exp()
 
     def state_dict(self):
         return {
@@ -597,7 +603,7 @@ class AutoEntropyCoeff:
     def load_state_dict(self, sd):
         self.log_alpha.data.copy_(sd["log_alpha"])
         self.optimizer.load_state_dict(sd["optimizer"])
-        self.value = float(self.log_alpha.exp().item())
+        self.value = self.log_alpha.detach().exp()
     
 class NormalActionNoise:
     def __init__(self, policy, action_space, scale=0.3, min_scale=0.03, decay_rate=0.000001, start_steps=10000, seed=None, device=torch.device("cpu")):
@@ -674,6 +680,60 @@ class NoActionNoise:
     def update(self, resets):
         pass
 
+class _ScalarLogBuffer:
+    """TensorBoard scalars collected over several iterations, written as means.
+
+    Tensor values stay on the device until flush(), which moves all of them with ONE copy
+    (torch.stack(...).cpu()); logging each with .item() as it arrives synced the GPU ~100 times per
+    iteration. Python numbers are averaged directly. Episode stats come in as [score sum, length sum,
+    count] over the window and are written as per-episode means (skipped when no episode finished)."""
+
+    def __init__(self):
+        self._values = {}       # key -> list of 0-dim tensors / Python floats
+        self._episodes = None
+
+    def add(self, key, value):
+        if isinstance(value, torch.Tensor):
+            value = value.detach()
+            if value.dim() > 0:
+                value = value.float().mean()
+            if value.device.type == "cpu":
+                value = float(value)      # no sync; keeps flush()'s single copy on one device
+        elif isinstance(value, np.ndarray):
+            value = float(value.mean())
+        self._values.setdefault(key, []).append(value)
+
+    def add_episodes(self, window):
+        self._episodes = window.clone()
+
+    def flush(self, writer, step):
+        tensors = [v for vals in self._values.values() for v in vals if isinstance(v, torch.Tensor)]
+        if self._episodes is not None:
+            tensors.append(self._episodes)
+        host = torch.cat([t.reshape(-1).float() for t in tensors]).cpu().tolist() if tensors else []
+        i = 0
+        for key, vals in self._values.items():
+            total, n = 0.0, 0
+            for v in vals:
+                if isinstance(v, torch.Tensor):
+                    x = host[i]
+                    i += 1
+                else:
+                    x = float(v)
+                if x == x:          # nan = undefined for that sample (e.g. no valid env), skipped
+                    total += x
+                    n += 1
+            if n:
+                writer.add_scalar(key, total / n, step)
+        if self._episodes is not None:
+            score, length, count = host[i:i + 3]
+            if count > 0:
+                writer.add_scalar('train/episode_score', score / count, step)
+                writer.add_scalar('train/episode_length', length / count, step)
+        self._values = {}
+        self._episodes = None
+
+
 class Trainer:
     '''Trainer used to train and evaluate an agent on an environment.'''
 
@@ -687,6 +747,7 @@ class Trainer:
         self.epoch_steps = self.config["train"]["epoch_steps"] or epoch_steps
         self.save_steps = self.config["train"]["save_steps"] or save_steps
         self.test_episodes = self.config["train"]["test_episodes"] or test_episodes
+        self.log_interval = max(1, int(self.config["train"].get("log_interval") or 1))
         self.show_progress = self.config["train"]["show_progress"] or show_progress
         self.replace_checkpoint = self.config["train"]["replace_checkpoint"] or replace_checkpoint
         # Log the training data to tensorboard.
@@ -765,15 +826,21 @@ class Trainer:
         scores = torch.zeros(num_workers, device=device, dtype=torch.float32)
         total_reward = torch.zeros(num_workers, device=device, dtype=torch.float32)
         lengths = torch.zeros(num_workers, device=device, dtype=torch.int32)
-        
-        self.steps, epoch_steps, epochs, episodes = 0, 0, 0, 0
+
+        self.steps, epoch_steps, epochs = 0, 0, 0
         iterations = 0
         steps_since_save = 0
         last_epoch_time = time.time()
-        
-        # Trackers for epoch stats
-        epoch_rewards = []
-        epoch_lengths = []
+
+        # Finished-episode stats, kept on the device (no per-step sync): [score sum, length sum, count]
+        # for the current log window and for the current epoch.
+        window_episodes = torch.zeros(3, device=device, dtype=torch.float32)
+        epoch_episodes = torch.zeros(3, device=device, dtype=torch.float32)
+        episodes = torch.zeros((), device=device, dtype=torch.float32)
+        # TensorBoard scalars, buffered for log_interval iterations and written as window means with
+        # ONE device->host copy (logging each scalar every step cost ~100 syncs per iteration).
+        log_buffer = _ScalarLogBuffer()
+        last_env_log = None
         current_loss = 0.0
         
         if self.log:
@@ -803,57 +870,40 @@ class Trainer:
                     
                 if self.log:
                     for key, value in agent_infos.items():
-                        if isinstance(value, torch.Tensor):
-                            value = value.mean().item()
-                        elif isinstance(value, np.ndarray):
-                            value = value.mean()
-                        writer.add_scalar(f'train/{key}', value, self.steps)
-                        
-                # Log environment extras (e.g. detailed reward terms)
-                if self.log and "log" in infos and infos["log"]:
-                    for key, value in infos["log"].items():
-                        if isinstance(value, torch.Tensor):
-                            value = value.item()
-                        writer.add_scalar(key, value, self.steps)
+                        log_buffer.add(f'train/{key}', value)
+                    # Environment extras (e.g. detailed reward terms). The env rebuilds this dict at each
+                    # reset and leaves it in place otherwise, so a repeated dict is the same episodes again.
+                    env_log = infos.get("log")
+                    if env_log and env_log is not last_env_log:
+                        last_env_log = env_log
+                        for key, value in env_log.items():
+                            log_buffer.add(key, value)
 
                 scores += infos['rewards']
                 lengths += 1
                 self.steps += num_workers
                 epoch_steps += 1
                 steps_since_save += 1
-                
+
                 # Update the progress bar
                 if self.show_progress:
                     progress_bar.update(1)
 
-                # Check the finished episodes.
-                # Vectorized reset check
+                # Finished episodes, without a sync: masked sums instead of nonzero / .item() / .tolist().
                 resets = infos['resets']
-                if resets.any():
-                    reset_indices = torch.nonzero(resets).flatten()
-                    
-                    # Log finished episodes
-                    if self.log:
-                        # We can log the mean of finished episodes in this step
-                        mean_score = scores[reset_indices].mean().item()
-                        mean_length = lengths[reset_indices].float().mean().item()
-                        writer.add_scalar('train/episode_score', mean_score, self.steps)
-                        writer.add_scalar('train/episode_length', mean_length, self.steps)
-                    
-                    # Update total reward for tracking
-                    total_reward[reset_indices] += scores[reset_indices]
-                    
-                    # Store for epoch logging
-                    epoch_rewards.extend(scores[reset_indices].tolist())
-                    epoch_lengths.extend(lengths[reset_indices].tolist())
-                    
-                    # Reset trackers
-                    scores[reset_indices] = 0
-                    lengths[reset_indices] = 0
-                    episodes += len(reset_indices)
-                    
-                    # Reset agent observations if needed (usually handled by env, but agent might have memory)
-                    # self.agent.reset_observations(reset_indices) # This might need update for vectorized
+                done = resets.to(torch.float32)
+                finished = torch.stack([(scores * done).sum(), (lengths.to(torch.float32) * done).sum(), done.sum()])
+                window_episodes += finished
+                epoch_episodes += finished
+                episodes += finished[2]
+                total_reward += scores * done
+                scores *= 1.0 - done
+                lengths.masked_fill_(resets.bool(), 0)
+
+                if self.log and iterations % self.log_interval == 0:
+                    log_buffer.add_episodes(window_episodes)
+                    log_buffer.flush(writer, self.steps)
+                    window_episodes.zero_()
 
                 # End of the epoch.
                 if epoch_steps >= self.epoch_steps:
@@ -871,9 +921,13 @@ class Trainer:
                         writer.add_scalar('train/epoch_time', epoch_time, self.steps)
                         writer.add_scalar('train/steps_per_second', sps, self.steps)
                         
-                    if len(epoch_rewards) > 0:
-                        mean_reward = sum(epoch_rewards) / len(epoch_rewards)
-                        mean_length = sum(epoch_lengths) / len(epoch_lengths)
+                    ep_score, ep_len, ep_count = epoch_episodes.tolist()   # one sync per epoch
+                    epoch_episodes.zero_()
+                    if isinstance(current_loss, torch.Tensor):
+                        current_loss = float(current_loss)
+                    if ep_count > 0:
+                        mean_reward = ep_score / ep_count
+                        mean_length = ep_len / ep_count
                         # Update progress bar description instead of printing
                         if self.show_progress:
                             progress_bar.set_description(f"Epoch {epochs} | Iter {iterations} | Loss: {current_loss:.4f} | Reward: {mean_reward:.2f} | SPS: {sps:.0f}")
@@ -884,10 +938,7 @@ class Trainer:
                             progress_bar.set_description(f"Epoch {epochs} | Iter {iterations} | Loss: {current_loss:.4f} | SPS: {sps:.0f}")
                         else:
                             print(f"Epoch {epochs}: SPS: {sps:.2f}, Time: {epoch_time:.2f}s (No episodes finished)")
-                    
-                    epoch_rewards = []
-                    epoch_lengths = []
-                    
+
                     last_epoch_time = time.time()
                     epoch_steps = 0
 
@@ -904,6 +955,8 @@ class Trainer:
                 if stop_training:
                     # end training
                     if self.log:
+                        log_buffer.add_episodes(window_episodes)
+                        log_buffer.flush(writer, self.steps)
                         writer.close()
                     break
                 

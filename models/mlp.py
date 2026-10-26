@@ -46,7 +46,7 @@ class MLPActor(nn.Module):
         if self.head_type == "gaussian":
             mean = self.mean_layer(out)
             std = torch.clamp(self.std_layer(out), self.std_min, self.std_max)
-            return Normal(mean, std)
+            return Normal(mean, std, validate_args=False)   # the default check syncs the GPU
         elif self.head_type == "gaussian_multivariate":
             mean = self.mean_layer(out)
             std = torch.clamp(self.std_layer(out), self.std_min, self.std_max)
